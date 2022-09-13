@@ -18,6 +18,16 @@ def log(*args):
     print(*args, file=sys.stderr)
 
 
+# Copied from https://stackoverflow.com/a/58055668
+class BearerAuth(requests.auth.AuthBase):
+    def __init__(self, token):
+        self.token = token
+
+    def __call__(self, r):
+        r.headers["authorization"] = "Bearer " + self.token
+        return r
+
+
 class JiraSearch(object):
     """ This factory will create the actual method used to fetch issues from JIRA. This is really just a closure that
         saves us having to pass a bunch of parameters all over the place all the time. """
@@ -32,11 +42,12 @@ class JiraSearch(object):
         self.fields = ','.join(['key', 'summary', 'status', 'description', 'issuetype', 'issuelinks', 'subtasks'])
 
     def get(self, uri, params={}):
-        headers = {'Content-Type' : 'application/json'}
+        headers = {'Content-Type': 'application/json'}
         url = self.url + uri
 
         if isinstance(self.auth, str):
-            return requests.get(url, params=params, cookies={'JSESSIONID': self.auth}, headers=headers, verify=self.no_verify_ssl)
+            return requests.get(url, params=params, cookies={'JSESSIONID': self.auth}, headers=headers,
+                                verify=self.no_verify_ssl)
         else:
             return requests.get(url, params=params, auth=self.auth, headers=headers, verify=(not self.no_verify_ssl))
 
@@ -69,6 +80,7 @@ def build_graph_data(start_issue_key, jira, excludes, show_directions, direction
     """ Given a starting image key and the issue-fetching function build up the GraphViz data representing relationships
         between issues. This will consider both subtasks and issue links.
     """
+
     def get_key(issue):
         return issue['key']
 
@@ -98,7 +110,9 @@ def build_graph_data(start_issue_key, jira, excludes, show_directions, direction
 
         if islink:
             return '"{}\\n({})"'.format(issue_key, summary)
-        return '"{}\\n({})" [href="{}", fillcolor="{}", style=filled]'.format(issue_key, summary, jira.get_issue_uri(issue_key), get_status_color(status))
+        return '"{}\\n({})" [href="{}", fillcolor="{}", style=filled]'.format(issue_key, summary,
+                                                                              jira.get_issue_uri(issue_key),
+                                                                              get_status_color(status))
 
     def process_link(fields, issue_key, link):
         if 'outwardIssue' in link:
@@ -184,9 +198,9 @@ def build_graph_data(start_issue_key, jira, excludes, show_directions, direction
                 for subtask in fields['subtasks']:
                     subtask_key = get_key(subtask)
                     log(issue_key + ' => has subtask => ' + subtask_key)
-                    node = '{}->{}[color=blue][label="subtask"]'.format (
-                            create_node_text(issue_key, fields),
-                            create_node_text(subtask_key, subtask['fields']))
+                    node = '{}->{}[color=blue][label="subtask"]'.format(
+                        create_node_text(issue_key, fields),
+                        create_node_text(subtask_key, subtask['fields']))
                     graph.append(node)
                     children.append(subtask_key)
 
@@ -213,21 +227,26 @@ def create_graph_image(graph_data, image_file, node_shape):
 
         [1]: http://code.google.com/apis/chart/docs/gallery/graphviz.html
     """
-    digraph = 'digraph{node [shape=' + node_shape +'];%s}' % ';'.join(graph_data)
+    digraph = 'digraph{node [shape=' + node_shape + '];%s}' % ';'.join(graph_data)
 
-    response = requests.post(GOOGLE_CHART_URL, data = {'cht':'gv', 'chl': digraph})
+    response = requests.post(GOOGLE_CHART_URL, data={'cht': 'gv', 'chl': digraph})
 
-    with open(image_file, 'w+b') as image:
+    print(response)
+
+    if response.status_code > 299:
+        print(response.content)
+        print(response.text)
+
+    with open(image_file, 'wb') as image:
         print('Writing to ' + image_file)
         binary_format = bytearray(response.content)
         image.write(binary_format)
-        image.close()
 
     return image_file
 
 
 def print_graph(graph_data, node_shape):
-    print('digraph{\nnode [shape=' + node_shape +'];\n\n%s\n}' % ';\n'.join(graph_data))
+    print('digraph{\nnode [shape=' + node_shape + '];\n\n%s\n}' % ';\n'.join(graph_data))
 
 
 def parse_args():
@@ -235,6 +254,7 @@ def parse_args():
     parser.add_argument('-u', '--user', dest='user', default=None, help='Username to access JIRA')
     parser.add_argument('-p', '--password', dest='password', default=None, help='Password to access JIRA')
     parser.add_argument('-c', '--cookie', dest='cookie', default=None, help='JSESSIONID session cookie value')
+    parser.add_argument('--token', dest='token', default=None, help='Personal access token')
     parser.add_argument('-N', '--no-auth', dest='no_auth', action='store_true', default=False, help='Use no authentication')
     parser.add_argument('-j', '--jira', dest='jira_url', default='http://jira.example.com', help='JIRA Base URL (with protocol)')
     parser.add_argument('-f', '--file', dest='image_file', default='issue_graph.png', help='Filename to write image to')
@@ -260,6 +280,7 @@ def filter_duplicates(lst):
     # Enumerate the list to restore order lately; reduce the sorted list; restore order
     def append_unique(acc, item):
         return acc if acc[-1][1] == item[1] else acc.append(item) or acc
+
     srt_enum = sorted(enumerate(lst), key=lambda i_val: i_val[1])
     return [item[1] for item in sorted(reduce(append_unique, srt_enum, [srt_enum[0]]))]
 
@@ -273,12 +294,12 @@ def main():
     elif options.no_auth is True:
         # Don't use authentication when it's not needed
         auth = None
+    elif options.token is not None:
+        auth = BearerAuth(options.token)
     else:
         # Basic Auth is usually easier for scripts like this to deal with than Cookies.
-        user = options.user if options.user is not None \
-                    else input('Username: ')
-        password = options.password if options.password is not None \
-                    else getpass.getpass('Password: ')
+        user = options.user if options.user is not None else input('Username: ')
+        password = options.password if options.password is not None else getpass.getpass('Password: ')
         auth = (user, password)
 
     jira = JiraSearch(options.jira_url, auth, options.no_verify_ssl)
